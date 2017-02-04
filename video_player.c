@@ -10,12 +10,11 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_thread.h>
 
-#define SDL2
 
 int main(int argc, char** argv)
 {
 
-	/* First, let's regiser all muxers ,demuxers, coders, decoders */
+	/* regiser all muxers ,demuxers, encoders, decoders */
 	av_register_all();
 
 	AVFormatContext *ic = NULL;
@@ -32,8 +31,7 @@ int main(int argc, char** argv)
 		goto fail;
 	}
 
-	
-	/* OK, it's the time to open file */
+    /* open input*/
 	int err = avformat_open_input(&ic, argv[1], NULL, NULL);
 	if (0 > err)
 	{
@@ -48,7 +46,7 @@ int main(int argc, char** argv)
 		goto fail;
 	}
 
-	/* output the media file info */
+	/* dump media info*/
 	av_dump_format(ic, 0, argv[1], 0);
 
 
@@ -72,7 +70,7 @@ int main(int argc, char** argv)
 
 	pVideoCodecContextOrigin = ic->streams[video_stream_index]->codec;
 	
-	/* Now, let's find the codec*/
+	/*find the codec*/
 	AVCodec *pVideoCodec = NULL;
 	printf("video codec id %d\n", pVideoCodecContextOrigin->codec_id);
 	pVideoCodec = avcodec_find_decoder(pVideoCodecContextOrigin->codec_id);
@@ -96,31 +94,6 @@ int main(int argc, char** argv)
 		goto fail;
 	}
 
-#ifndef SDL2
-	/* Init SDL */
-	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER))
-	{
-		printf("SDL init failed\n");
-		goto fail;
-	}
-	SDL_Surface *screen = NULL;
-	screen = SDL_SetVideoMode(pVideoCodecContext->width, pVideoCodecContext->height, 
-								0, 0);
-	if (NULL == screen)
-	{
-		printf("Create SDL surface failed\n");
-		goto fail;
-	}
-
-	SDL_Overlay *bmp = NULL;
-	bmp = SDL_CreateYUVOverlay(pVideoCodecContext->width, pVideoCodecContext->height, 
-								SDL_YV12_OVERLAY, screen);
-	if (NULL == bmp)
-	{
-		printf("SDL Create YUV Overlay failed\n");
-		goto fail;
-	}
-#else
     /* Init SDL */
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER))
 	{
@@ -149,7 +122,6 @@ int main(int argc, char** argv)
         printf("create SDL Window failed\n");
 		goto fail;
     }
-#endif
 
 	SDL_Rect rect;
 	SDL_Event event;
@@ -180,18 +152,6 @@ int main(int argc, char** argv)
 	AVPacket packet;
 
 	
-#ifndef SDL2	
-	sws_context = sws_getContext(pVideoCodecContext->width, 
-								 pVideoCodecContext->height, 
-								 pVideoCodecContext->pix_fmt, 
-								 pVideoCodecContext->width, 
-								 pVideoCodecContext->height,
-								 AV_PIX_FMT_YUV420P, 
-								 SWS_BILINEAR,
-								 NULL, 
-								 NULL, 
-								 NULL);
-#endif
 	i = 0;
 	while (av_read_frame(ic, &packet) >= 0)
 	{
@@ -200,46 +160,20 @@ int main(int argc, char** argv)
 			avcodec_decode_video2(pVideoCodecContext, pFrame, &frame_finished, &packet);
 			if (frame_finished)
 			{
-#ifndef SDL2
-				/* display the image */
-				SDL_LockYUVOverlay(bmp);
-#endif
 				AVPicture picture;
-
-#ifndef SDL2
-				picture.data[0] = bmp->pixels[0];
-				picture.data[1] = bmp->pixels[2];
-				picture.data[2] = bmp->pixels[1];
-
-				picture.linesize[0] = bmp->pitches[0];
-				picture.linesize[1] = bmp->pitches[2];
-				picture.linesize[2] = bmp->pitches[1];				
-#endif
-
-#ifndef SDL2				
-				/* convert image from its native fmt to YUV420 */
-				sws_scale(sws_context, (const uint8_t * const*)pFrame->data, pFrame->linesize, 0, 
-							pVideoCodecContext->height, picture.data, picture.linesize);
 				
-				printf("Y line_size %d, U line_size %d, V line_size %d\n", 
-#endif							picture.linesize[0], picture.linesize[1], picture.linesize[2]);
-#ifndef SDL2				
-				SDL_UnlockYUVOverlay(bmp);
-#endif
 				rect.x = 0;
 				rect.y = 0;
 				rect.w = pVideoCodecContext->width;
 				rect.h = pVideoCodecContext->height;
-#ifndef SDL2
-				SDL_DisplayYUVOverlay(bmp, &rect);
-#else
+
                 SDL_UpdateYUVTexture(texture, NULL, pFrame->data[0], pFrame->linesize[0],
                                                   pFrame->data[1], pFrame->linesize[1],
                                                   pFrame->data[2], pFrame->linesize[2]);
                 SDL_RenderClear(renderer);
 				SDL_RenderCopy(renderer, texture, NULL, &rect);
 				SDL_RenderPresent(renderer);
-#endif
+
 			}
 		}
 
