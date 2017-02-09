@@ -42,6 +42,8 @@ audio_pkt_queue audio_queue;
 
 int init_audio_pkt_queue(audio_pkt_queue* queue)
 {
+	queue->first_pkt = NULL;
+	queue->last_pkt = NULL;
 	memset(queue, 0x00, sizeof(queue));
 	queue->mutex = SDL_CreateMutex();
 	queue->cond = SDL_CreateCond();
@@ -51,6 +53,7 @@ int init_audio_pkt_queue(audio_pkt_queue* queue)
 int put_audio_pkt_to_queue(audio_pkt_queue* queue, AVPacket *pkt)
 {
 	AVPacketList *pkt_list;
+	int i;
 	pkt_list = (AVPacketList *)av_malloc(sizeof(AVPacketList));
 	if (NULL == pkt_list) {
 		printf("malloc AVPacketList failed\n");
@@ -60,18 +63,25 @@ int put_audio_pkt_to_queue(audio_pkt_queue* queue, AVPacket *pkt)
 	pkt_list->next = NULL;
 	
 	SDL_LockMutex(queue->mutex);
+
 	if (!queue->first_pkt) {
 		queue->first_pkt = pkt_list;
 	} else {
 		if (queue->last_pkt) {
 			queue->last_pkt->next = pkt_list;
+		} else {
+		    queue->first_pkt->next = pkt_list;
 		}
 		queue->last_pkt = pkt_list;
 	}
-
+	printf("========put audio pkt, data addr 0x%x, size %d, pos %lld\n", pkt_list->pkt.data, pkt_list->pkt.size, pkt_list->pkt.pos);
+	for (i = 0; i < 10; i++) {
+		printf("%d ", pkt_list->pkt.data[i]);
+	}
+	printf("\n");
 	queue->num_pkt++;
 	queue->size += pkt->size;
-	printf("put audio pkt, num %d, size %d\n", queue->num_pkt, queue->size);
+	
 	SDL_CondSignal(queue->cond);
 	SDL_UnlockMutex(queue->mutex);
 	return 0;
@@ -79,6 +89,7 @@ int put_audio_pkt_to_queue(audio_pkt_queue* queue, AVPacket *pkt)
 
 int get_audio_pkt_from_queue(audio_pkt_queue* queue, AVPacket *pkt)
 {
+	int i;
 	AVPacketList *pktList;
 	SDL_LockMutex(queue->mutex);
 	while (1) {
@@ -87,12 +98,16 @@ int get_audio_pkt_from_queue(audio_pkt_queue* queue, AVPacket *pkt)
 			SDL_CondWait(queue->cond, queue->mutex);
 		} else {
 			pktList = queue->first_pkt;
-			queue->first_pkt = pktList->next;
 			*pkt = pktList->pkt;
+			printf("========get audio pkt, data addr 0x%x, size %d, pos %lld\n", pktList->pkt.data, queue->first_pkt->pkt.size, queue->first_pkt->pkt.pos);
+			for (i = 0; i < 10; i++) {
+				printf("%d ", queue->first_pkt->pkt.data[i]);
+			}
+			printf("\n");
+			queue->first_pkt = pktList->next;
 			av_free(pktList);
 			queue->num_pkt--;
 			queue->size -= pkt->size;
-			printf("get packet success\n");
 			break;
 		}
 	}
@@ -255,7 +270,7 @@ int init_SDL_play_video(char *title, int posx, int posy, int width, int height, 
 	return 0;
 }
 
-int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* out_buffer, int buf_size)
+int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* audio_buf, int buf_size)
 {
 	AVFrame *pAudioFrame;
 	AVPacket packet;
@@ -273,12 +288,12 @@ int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* out_buffe
 		    decoder_pcm_size = av_samples_get_buffer_size(NULL, pAudioCodecContext->channels,
 		                               pAudioFrame->nb_samples,
 		                               pAudioCodecContext->sample_fmt, 1);
-			printf("decoder audio sucess, decoder_pcm_size %d\n", decoder_pcm_size);
+			//printf("decoder audio sucess, decoder_pcm_size %d\n", decoder_pcm_size);
 			if (decoder_pcm_size > buf_size) {
-				printf("[audio_decoder_one_frame], decoder pcm size is too large\n");
+				//printf("[audio_decoder_one_frame], decoder pcm size is too large\n");
 				continue;
 			}
-			memcpy(out_buffer, pAudioFrame->data[0], decoder_pcm_size);
+			memcpy(audio_buf, pAudioFrame->data[0], decoder_pcm_size);
 			av_free(pAudioFrame);
 			return decoder_pcm_size;
 		} else {
@@ -290,7 +305,7 @@ int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* out_buffe
 
 void audio_callback(void *opaque, Uint8 *stream, int len)
 {
-	printf("enter audio callback\n");
+	//printf("enter audio callback\n");
 	AVCodecContext *pAudioCodecContext = opaque;
 	static Uint8 pcm_buffer_decoder[(AVCODEC_MAX_AUDIO_FRAME_SIZE * 3) / 2] = {0};
 	static int valid_pcm_bytes = 0;
@@ -304,20 +319,23 @@ void audio_callback(void *opaque, Uint8 *stream, int len)
 			printf("[audio_callback], desired len %d, valid len %d, return len %d\n", len, valid_pcm_bytes, copy_size);
 			memcpy(stream, pcm_buffer_decoder, copy_size);
 			len -= copy_size;
+			if (len > 0) {
+				stream += copy_size;
+			}
 			valid_pcm_bytes -= copy_size;
         }
 	}
 	return;
 }
 
-int init_SDL_play_audio(void *userdata, int format, int channels, int sample)
+int init_SDL_play_audio(void *userdata, int format, int channels, int sample, int frame_size)
 {
 	SDL_AudioSpec wanted_spec, spec;
 	wanted_spec.channels = 2;
     wanted_spec.freq = sample;
-	wanted_spec.format = AUDIO_S32SYS;
+	wanted_spec.format = AUDIO_S16SYS;
 	wanted_spec.silence = 0;
-    wanted_spec.samples = 512;
+    wanted_spec.samples = frame_size;
     wanted_spec.callback = audio_callback;
     wanted_spec.userdata = userdata;
 
@@ -330,8 +348,6 @@ int init_SDL_play_audio(void *userdata, int format, int channels, int sample)
 		printf("return:channels %d, freq %dHz, format %d\n", spec.channels, spec.freq, spec.format);
 		return 0;
 	}
-	
-	
 }
 
 int display_video_frame(AVFrame *pFrame)
@@ -467,7 +483,9 @@ int main(int argc, char** argv)
 						SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 
 	
-	init_SDL_play_audio(pAudioCodecContext, pAudioCodecContext->sample_fmt, pAudioCodecContext->channels, pAudioCodecContext->sample_rate);
+	init_SDL_play_audio(pAudioCodecContext, pAudioCodecContext->sample_fmt, 
+			pAudioCodecContext->channels, pAudioCodecContext->sample_rate,
+			pAudioCodecContext->frame_size);
 	
 	/* open video decoder */
 	if (avcodec_open2(pVideoCodecContext, pVideoCodec, NULL) < 0)
@@ -493,7 +511,15 @@ int main(int argc, char** argv)
 		printf("malloc space pFrame failed\n");
 		goto fail;
 	}
-	
+#if 0	
+	int64_t in_channel_layout=av_get_default_channel_layout(pAudioCodecContext->channels);
+	struct SwrContext *au_convert_ctx;  
+    au_convert_ctx = swr_alloc();  
+    au_convert_ctx=swr_alloc_set_opts(au_convert_ctx, AV_CH_LAYOUT_STEREO, AV_SAMPLE_FMT_S16, 44100,  
+        			in_channel_layout, pAudioCodecContext->sample_fmt ,
+        			pAudioCodecContext->sample_rate,0, NULL);  
+    swr_init(au_convert_ctx);
+#endif	
 	int frame_finished = -1;
 	AVPacket packet;
 	while (av_read_frame(ic, &packet) >= 0)
@@ -507,10 +533,9 @@ int main(int argc, char** argv)
 				display_video_frame(pVideoFrame);
 			}
 		} else if (packet.stream_index == audio_stream_index) {
-			put_audio_pkt_to_queue(&audio_queue, &packet);
-			SDL_PauseAudio(0);
+				put_audio_pkt_to_queue(&audio_queue, &packet);
+				SDL_PauseAudio(0);
 		}
-		av_free_packet(&packet);
 		SDL_PollEvent(&event);
 		switch (event.type)
 		{
