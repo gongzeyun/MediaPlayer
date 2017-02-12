@@ -11,6 +11,9 @@
 #include <SDL2/SDL_thread.h>
 #include <stdlib.h>
 #include <stdio.h>
+//#include "libswresample/swresample_internal.h"
+#include "libswresample/swresample.h"
+
 
 /* SDL component*/
 SDL_Window *window = NULL;
@@ -19,7 +22,14 @@ SDL_Texture *texture = NULL;
 SDL_Rect rect;
 SDL_Event event;
 
+struct SwrContext *swr_ctx;
+
 #define AVCODEC_MAX_AUDIO_FRAME_SIZE 192000
+#define DUMP_AUDIO_DECODER_OUTPUT
+
+#ifdef DUMP_AUDIO_DECODER_OUTPUT
+FILE *pFile;
+#endif
 
 typedef struct pcm_buffer{
 	uint8_t *data;
@@ -66,6 +76,13 @@ int put_audio_pkt_to_queue(audio_pkt_queue* queue, AVPacket *pkt)
 
 	if (!queue->first_pkt) {
 		queue->first_pkt = pkt_list;
+#if 1
+		printf("========put audio pkt to first, data addr 0x%x, size %d, pos %lld\n", pkt_list->pkt.data, pkt_list->pkt.size, pkt_list->pkt.pos);
+		for (i = 0; i < 10; i++) {
+			printf("%d ", pkt_list->pkt.data[i]);
+		}
+		printf("\n");
+#endif
 	} else {
 		if (queue->last_pkt) {
 			queue->last_pkt->next = pkt_list;
@@ -73,12 +90,15 @@ int put_audio_pkt_to_queue(audio_pkt_queue* queue, AVPacket *pkt)
 		    queue->first_pkt->next = pkt_list;
 		}
 		queue->last_pkt = pkt_list;
+#if 1
+		printf("========put audio pkt, data addr 0x%x, size %d, pos %lld\n", pkt_list->pkt.data, pkt_list->pkt.size, pkt_list->pkt.pos);
+		for (i = 0; i < 10; i++) {
+			printf("%d ", pkt_list->pkt.data[i]);
+		}
+		printf("\n");
+#endif
 	}
-	printf("========put audio pkt, data addr 0x%x, size %d, pos %lld\n", pkt_list->pkt.data, pkt_list->pkt.size, pkt_list->pkt.pos);
-	for (i = 0; i < 10; i++) {
-		printf("%d ", pkt_list->pkt.data[i]);
-	}
-	printf("\n");
+	
 	queue->num_pkt++;
 	queue->size += pkt->size;
 	
@@ -94,16 +114,19 @@ int get_audio_pkt_from_queue(audio_pkt_queue* queue, AVPacket *pkt)
 	SDL_LockMutex(queue->mutex);
 	while (1) {
 		if (!queue->first_pkt) {
+			queue->last_pkt = NULL;
 			printf("audio pkt queue is empty, please wait!\n");
 			SDL_CondWait(queue->cond, queue->mutex);
 		} else {
 			pktList = queue->first_pkt;
 			*pkt = pktList->pkt;
+#if 1
 			printf("========get audio pkt, data addr 0x%x, size %d, pos %lld\n", pktList->pkt.data, queue->first_pkt->pkt.size, queue->first_pkt->pkt.pos);
 			for (i = 0; i < 10; i++) {
 				printf("%d ", queue->first_pkt->pkt.data[i]);
 			}
 			printf("\n");
+#endif
 			queue->first_pkt = pktList->next;
 			av_free(pktList);
 			queue->num_pkt--;
@@ -278,22 +301,34 @@ int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* audio_buf
 	int got_frame = 0;
 
 	pAudioFrame = av_frame_alloc();
-	int decoder_pcm_size  = 0;
+	int out_sample_size  = 0;
+	int decoder_pcm_size = 0;
+	
 	while (!decoder_pcm_size) {
 		get_audio_pkt_from_queue(&audio_queue, &packet);
 		
 		/* decoder audio packet */
 		avcodec_decode_audio4(pAudioCodecContext, pAudioFrame, &got_frame, &packet);
 		if (got_frame) {
-		    decoder_pcm_size = av_samples_get_buffer_size(NULL, pAudioCodecContext->channels,
-		                               pAudioFrame->nb_samples,
-		                               pAudioCodecContext->sample_fmt, 1);
-			//printf("decoder audio sucess, decoder_pcm_size %d\n", decoder_pcm_size);
+			//printf("before convert, size %d\n", pAudioFrame->nb_samples);
+			out_sample_size = swr_convert(swr_ctx, &audio_buf, buf_size, (const uint8_t **)pAudioFrame->extended_data, pAudioFrame->nb_samples);
+			
+			
+			decoder_pcm_size = out_sample_size * 2 * 2;
+
+			//printf("after convert, sample size %d, decoder pcm size %d\n", 
+			//			out_sample_size, decoder_pcm_size);
+			
 			if (decoder_pcm_size > buf_size) {
 				//printf("[audio_decoder_one_frame], decoder pcm size is too large\n");
+				decoder_pcm_size = 0;
 				continue;
 			}
-			memcpy(audio_buf, pAudioFrame->data[0], decoder_pcm_size);
+#ifdef DUMP_AUDIO_DECODER_OUTPUT
+			if (pFile != NULL) {
+				fwrite(audio_buf, decoder_pcm_size, 1, pFile);
+			}
+#endif
 			av_free(pAudioFrame);
 			return decoder_pcm_size;
 		} else {
@@ -305,7 +340,6 @@ int audio_decoder_one_frame(AVCodecContext *pAudioCodecContext, Uint8* audio_buf
 
 void audio_callback(void *opaque, Uint8 *stream, int len)
 {
-	//printf("enter audio callback\n");
 	AVCodecContext *pAudioCodecContext = opaque;
 	static Uint8 pcm_buffer_decoder[(AVCODEC_MAX_AUDIO_FRAME_SIZE * 3) / 2] = {0};
 	static int valid_pcm_bytes = 0;
@@ -316,7 +350,7 @@ void audio_callback(void *opaque, Uint8 *stream, int len)
 		}
         if (valid_pcm_bytes > 0) {
 			int copy_size = len < valid_pcm_bytes ? len : valid_pcm_bytes;
-			printf("[audio_callback], desired len %d, valid len %d, return len %d\n", len, valid_pcm_bytes, copy_size);
+			//printf("[audio_callback], desired len %d, valid len %d, return len %d\n", len, valid_pcm_bytes, copy_size);
 			memcpy(stream, pcm_buffer_decoder, copy_size);
 			len -= copy_size;
 			if (len > 0) {
@@ -335,7 +369,7 @@ int init_SDL_play_audio(void *userdata, int format, int channels, int sample, in
     wanted_spec.freq = sample;
 	wanted_spec.format = AUDIO_S16SYS;
 	wanted_spec.silence = 0;
-    wanted_spec.samples = frame_size;
+    wanted_spec.samples = 512;
     wanted_spec.callback = audio_callback;
     wanted_spec.userdata = userdata;
 
@@ -373,6 +407,15 @@ int main(int argc, char** argv)
     	printf("init sdl system fail\n");
 		goto fail;
     }
+
+	
+	
+#ifdef DUMP_AUDIO_DECODER_OUTPUT
+ 	pFile = fopen("/home/gongzeyun/output.pcm", "wb");
+	if (pFile != NULL) {
+		printf("enable dump audio decoder pcm, dump path[/home/gongzeyun/output.pcm]\n");
+	}
+#endif
 	/* regiser all muxers ,demuxers, encoders, decoders */
 	av_register_all();
 
@@ -482,10 +525,16 @@ int main(int argc, char** argv)
 						pVideoCodecContext->width, pVideoCodecContext->height,
 						SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 
+	printf("audio info: sample %d, format %d, channels %d, channel_layout %d\n", 
+				pAudioCodecContext->sample_rate, pAudioCodecContext->sample_fmt, 
+				pAudioCodecContext->channels, pAudioCodecContext->channel_layout);
 	
 	init_SDL_play_audio(pAudioCodecContext, pAudioCodecContext->sample_fmt, 
 			pAudioCodecContext->channels, pAudioCodecContext->sample_rate,
 			pAudioCodecContext->frame_size);
+
+
+	
 	
 	/* open video decoder */
 	if (avcodec_open2(pVideoCodecContext, pVideoCodec, NULL) < 0)
@@ -499,6 +548,27 @@ int main(int argc, char** argv)
 	{
 		printf("open audio codec failed\n");
 		goto fail;
+	}
+
+	swr_free(&swr_ctx);
+	swr_ctx = swr_alloc_set_opts(NULL,
+					 AV_CH_LAYOUT_STEREO,
+					 AV_SAMPLE_FMT_S16,
+					 48000,
+					 pAudioCodecContext->channel_layout,
+					 pAudioCodecContext->sample_fmt,
+					 pAudioCodecContext->sample_rate,
+					 0, NULL);
+	//printf("in_ch %d, in_fmt %d, in_sample %d\nout_ch %d, out_fmt %d, out_sample %d\n", 
+	//		swr_ctx->in_ch_layout, swr_ctx->in_sample_fmt, swr_ctx->in_sample_rate,
+	//		swr_ctx->out_ch_layout, swr_ctx->out_sample_fmt, swr_ctx->out_sample_rate);
+	if (swr_ctx) {
+		printf("start init swr ctx\n");
+		swr_init(swr_ctx);
+		printf("init swr ctx success\n");
+	} else {
+		printf("malloc swr ctx failed\n");
+		return -1;
 	}
 
 	AVFrame *pVideoFrame = NULL;
@@ -533,6 +603,7 @@ int main(int argc, char** argv)
 				display_video_frame(pVideoFrame);
 			}
 		} else if (packet.stream_index == audio_stream_index) {
+				printf("get audio pkt, pos %lld\n", packet.pos);
 				put_audio_pkt_to_queue(&audio_queue, &packet);
 				SDL_PauseAudio(0);
 		}
@@ -567,6 +638,11 @@ int main(int argc, char** argv)
 	avcodec_close(pVideoCodecContextOrigin);
 	avcodec_close(pAudioCodecContext);
 	avcodec_close(pAudioCodecContextOrigin);
+#ifdef DUMP_AUDIO_DECODER_OUTPUT
+		if (pFile != NULL) {
+			fclose(pFile);
+		}
+#endif
 
 	avformat_close_input(&ic);
 	
